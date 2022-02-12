@@ -28,8 +28,11 @@ defmodule CStruct do
     fields_with_data = Keyword.keys(keyword_list)
     fields_with_explict_attr = Keyword.validate(attributes, [order: fields_with_data])
 
-    IO.inspect(Keyword.keys(keyword_list))
-    IO.inspect(Keyword.keys(attributes))
+    # todo: 1. verify all fields in `fields_with_data` are specified in `order`
+    # todo: 2. calculate the size in bytes
+    # todo: 3. handle `void * data`
+    # todo: 4. transform everything into binary (in C? in Elixir? seems to be easier if we do this in Elixir)
+    # todo: 5. call NIF
   end
 
   defp _to_c_struct(_keyword_list, _attributes, _, _), do: report_error("Not a valid Keyword List")
@@ -48,6 +51,7 @@ defmodule CStruct do
     ]
 
     # todo: support align?
+    # todo: support bitfield?
     attributes = [
       specs: %{
         re: %{:type => :f64},                           # double re;
