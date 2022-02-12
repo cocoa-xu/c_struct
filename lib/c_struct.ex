@@ -25,23 +25,34 @@ defmodule CStruct do
       <<0, 0, 0, 1>>
   """
   def to_c_struct(data, attributes, opts \\ [])
+
   def to_c_struct(keyword_list, attributes, opts)
       when is_list(keyword_list) and is_list(attributes) do
     allow_missing = Keyword.get(opts, :allow_missing, false)
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
+    ir_only = Keyword.get(opts, :ir_only, false)
 
-    ir = _to_c_struct(
-      Keyword,
-      keyword_list,
-      attributes,
-      allow_missing,
-      allow_extra,
-      default_endianness,
-      Keyword.keyword?(keyword_list),
-      Keyword.keyword?(attributes)
-    )
-    CStruct.Nif.to_binary(ir)
+    with {:error, reason} <-
+           _to_c_struct(
+             Keyword,
+             keyword_list,
+             attributes,
+             allow_missing,
+             allow_extra,
+             default_endianness,
+             Keyword.keyword?(keyword_list),
+             Keyword.keyword?(attributes)
+           ) do
+      {:error, reason}
+    else
+      ir ->
+        if ir_only do
+          ir
+        else
+          {CStruct.Nif.to_binary(ir), ir}
+        end
+    end
   end
 
   def to_c_struct(map_data, attributes, opts)
@@ -49,36 +60,56 @@ defmodule CStruct do
     allow_missing = Keyword.get(opts, :allow_missing, false)
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
+    ir_only = Keyword.get(opts, :ir_only, false)
 
-    ir = _to_c_struct(
-      Map,
-      map_data,
-      attributes,
-      allow_missing,
-      allow_extra,
-      default_endianness,
-      true,
-      Keyword.keyword?(attributes)
-    )
-    CStruct.Nif.to_binary(ir)
+    with {:error, reason} <-
+           _to_c_struct(
+             Map,
+             map_data,
+             attributes,
+             allow_missing,
+             allow_extra,
+             default_endianness,
+             true,
+             Keyword.keyword?(attributes)
+           ) do
+      {:error, reason}
+    else
+      ir ->
+        if ir_only do
+          ir
+        else
+          {CStruct.Nif.to_binary(ir), ir}
+        end
+    end
   end
 
   def to_c_struct(module, data, attributes, opts) when is_list(attributes) and is_list(opts) do
     allow_missing = Keyword.get(opts, :allow_missing, false)
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
+    ir_only = Keyword.get(opts, :ir_only, false)
 
-    ir = _to_c_struct(
-      module,
-      data,
-      attributes,
-      allow_missing,
-      allow_extra,
-      default_endianness,
-      true,
-      Keyword.keyword?(attributes)
-    )
-    CStruct.Nif.to_binary(ir)
+    with {:error, reason} <-
+           _to_c_struct(
+             module,
+             data,
+             attributes,
+             allow_missing,
+             allow_extra,
+             default_endianness,
+             true,
+             Keyword.keyword?(attributes)
+           ) do
+      {:error, reason}
+    else
+      ir ->
+        if ir_only do
+          ir
+        else
+          {CStruct.Nif.to_binary(ir), ir}
+        end
+    end
   end
 
   defp _to_c_struct(
@@ -189,25 +220,52 @@ defmodule CStruct do
               {:error, "field '#{field}' declared as union type, but no union specs provided"}
             end
 
+          :struct ->
+            if Map.has_key?(field_spec, :struct) do
+              with {:error, reason} <-
+                     to_c_struct(field_data, field_spec[:struct],
+                       ir_only: true,
+                       default_endianness: endianness
+                     ) do
+                {:error, reason}
+              else
+                ir ->
+                  {:ir, ir}
+              end
+            else
+              {:error, "field '#{field}' declared as union type, but no union specs provided"}
+            end
+
           field_type ->
             {:ok, _to_memory(field_data, field_type, endianness)}
         end
 
-      if status == :ok do
-        _to_memory(module, other_fields, data, field_specs, default_endianness, [
-          binary | acc_memory
-        ])
-      else
-        {status, binary}
+      case status do
+        :ok ->
+          _to_memory(module, other_fields, data, field_specs, default_endianness, [
+            binary | acc_memory
+          ])
+
+        :ir ->
+          merged_ir =
+            for struct_ir <- binary, reduce: acc_memory do
+              acc ->
+                [struct_ir | acc]
+            end
+
+          _to_memory(module, other_fields, data, field_specs, default_endianness, merged_ir)
+
+        _ ->
+          {status, binary}
       end
     else
       {:error, "field '#{field}' did not specify its type"}
     end
   end
 
-  defp _to_memory(field_data, :u8, _), do: <<field_data::integer()-size(8)>>
+  defp _to_memory(field_data, :u8, _endianness), do: <<field_data::integer()-size(8)>>
 
-  defp _to_memory(field_data, :s8, _), do: <<field_data::integer()-size(8)>>
+  defp _to_memory(field_data, :s8, _endianness), do: <<field_data::integer()-size(8)>>
 
   defp _to_memory(field_data, :u16, :little), do: <<field_data::integer()-size(16)-little>>
 
@@ -293,9 +351,52 @@ defmodule CStruct do
     |> Enum.reverse()
   end
 
+  defp _field_size(:u8, _), do: 1
+  defp _field_size(:u16, _), do: 2
+  defp _field_size(:u32, _), do: 4
+  defp _field_size(:u64, _), do: 8
+  defp _field_size(:s8, _), do: 1
+  defp _field_size(:s16, _), do: 2
+  defp _field_size(:s32, _), do: 4
+  defp _field_size(:s64, _), do: 8
+  defp _field_size(:f32, _), do: 4
+  defp _field_size(:f64, _), do: 8
+  defp _field_size(:c_ptr, _), do: CStruct.Nif.ptr_size()
+  defp _field_size(:string, _), do: CStruct.Nif.ptr_size()
+
+  defp _field_size([field_type], field_specs) when is_atom(field_type) do
+    num_elements =
+      List.to_tuple(field_specs[:shape] || [1])
+      |> Tuple.product()
+
+    _field_size(field_type, field_specs) * num_elements
+  end
+
+  defp _field_size([field_type], field_specs) when is_list(field_type) do
+    num_elements =
+      List.to_tuple(field_specs[:shape] || [1])
+      |> Tuple.product()
+
+    CStruct.Nif.ptr_size() * num_elements
+  end
+
+  defp _field_size(:union, union_specs) do
+    union_specs
+    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+    |> Enum.map(fn {field_type, field_specs} ->
+      if field_type == :union do
+        _field_size(field_type, field_specs[:union])
+      else
+        _field_size(field_type, field_specs)
+      end
+    end)
+    |> Enum.max()
+  end
+
   defp _to_memory(field_data, :union, union_specs, endianness) do
     with {:is_keyword_list, true} <- {:is_keyword_list, Keyword.keyword?(field_data)},
-         {:is_union_specs_keyword_list, true} <- {:is_union_specs_keyword_list, Keyword.keyword?(union_specs)},
+         {:is_union_specs_keyword_list, true} <-
+           {:is_union_specs_keyword_list, Keyword.keyword?(union_specs)},
          keys <- Keyword.keys(field_data),
          {:num_keys, 1} <- {:num_keys, Enum.count(keys)},
          field_select <- Enum.at(keys, 0),
@@ -304,15 +405,35 @@ defmodule CStruct do
          field_specs <- Keyword.get(union_specs, field_select),
          {:specs_has_type, field_select, true} <-
            {:specs_has_type, field_select, Map.has_key?(field_specs, :type)} do
-      {:ok, _to_memory(Keyword.get(field_data, field_select), field_specs[:type], endianness)}
+      real_binary_data =
+        _to_memory(Keyword.get(field_data, field_select), field_specs[:type], endianness)
+
+      real_size =
+        case real_binary_data do
+          real_binary_data when is_binary(real_binary_data) -> byte_size(real_binary_data)
+          real_binary_data when is_list(real_binary_data) -> CStruct.Nif.ptr_size()
+          {real_binary_data, [:padding, padding]} when is_binary(real_binary_data) ->
+            byte_size(real_binary_data) + padding
+          {real_binary_data, [:padding, padding]} when is_list(real_binary_data) ->
+            CStruct.Nif.ptr_size() + padding
+        end
+      max_size = _field_size(:union, union_specs)
+
+      binary =
+        if real_size < max_size do
+          {real_binary_data, [:padding, max_size - real_size]}
+        else
+          real_binary_data
+        end
+
+      {:ok, binary}
     else
       {:is_keyword_list, false} ->
         {:error,
          "the data of a union field should be provided as a keyword list that contains a single key-value pair"}
 
       {:is_union_specs_keyword_list, false} ->
-        {:error,
-          "the type of the union specs should be a keyword list"}
+        {:error, "the type of the union specs should be a keyword list"}
 
       {:num_keys, num} ->
         {:error,
@@ -374,7 +495,7 @@ defmodule CStruct do
       be_f32: 123.456,
       be_f64: -123.456,
       null_terminated_string: "hello",
-      null_terminated_iodata: [1, 2, 4, 8],
+      null_terminated_iodata: [1, 2, 4, 8]
     ]
   end
 
@@ -454,10 +575,10 @@ defmodule CStruct do
           ]
         },
         s8: %{
-          :type => :s8,
+          :type => :s8
         },
         le_s16: %{
-          :type => :s16,
+          :type => :s16
         },
         be_u16: %{
           :type => :u16,

@@ -4,8 +4,234 @@ defmodule CStructTest do
   test "to c struct with valid keyword_list and attributes" do
     keyword_list = CStruct.get_test_keyword_list()
     attributes = CStruct.get_test_attributes()
-    generated_c_struct_bin = CStruct.to_c_struct(keyword_list, attributes)
+    generated_c_struct_bin = CStruct.to_c_struct(keyword_list, attributes, ir_only: true)
     assert is_list(generated_c_struct_bin)
+  end
+
+  test "union field size" do
+    keyword_list = [
+      val: [select_u32: 1]
+    ]
+
+    attributes = [
+      specs: %{
+        val: %{
+          type: :union,
+          union: [
+            other_u64: %{
+              type: :u64
+            },
+            select_u32: %{
+              type: :u32
+            },
+            other_s8: %{
+              type: :s8
+            },
+            other_nd_array: %{
+              type: [:u32],
+              shape: [2, 2]
+            },
+            other_indirect_array: %{
+              type: [[:u32]]
+            }
+          ]
+        }
+      },
+      order: [
+        :val
+      ]
+    ]
+
+    # struct foo {
+    #     union {
+    #         uint64_t other_u64;
+    #         uint32_t select_u32;
+    #         int8_t other_s8;
+    #         uint32_t other_nd_array[2][2];
+    #         uint32_t *other_indirect_array;
+    #     } val;
+    # };
+    # sizeof(struct foo) == 16
+
+    [select_u32_ir] = CStruct.to_c_struct(keyword_list, attributes, ir_only: true)
+    assert {<<1, 0, 0, 0>>, [:padding, 12]} = select_u32_ir
+  end
+
+  test "union in union" do
+    keyword_list = [
+      val: [select_u32: 1]
+    ]
+
+    attributes = [
+      specs: %{
+        val: %{
+          type: :union,
+          union: [
+            other_u64: %{
+              type: :u64
+            },
+            select_u32: %{
+              type: :u32
+            },
+            other_s8: %{
+              type: :s8
+            },
+            other_nd_array: %{
+              type: [:u32],
+              shape: [2, 2]
+            },
+            other_indirect_array: %{
+              type: [[:u32]]
+            },
+            inner: %{
+              type: :union,
+              union: [
+                inner_nd_array: %{
+                  type: [:u64],
+                  shape: [2, 2]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      order: [
+        :val
+      ]
+    ]
+
+    # struct foo {
+    #     union {
+    #         uint64_t other_u64;
+    #         uint32_t select_u32;
+    #         int8_t other_s8;
+    #         uint32_t other_nd_array[2][2];
+    #         uint32_t *other_indirect_array;
+    #         union {
+    #             uint64_t inner_nd_array[2][2];
+    #         } inner;
+    #     } val;
+    # };
+    # sizeof(struct foo) == 32
+
+    [select_u32_ir] = CStruct.to_c_struct(keyword_list, attributes, ir_only: true)
+    assert {<<1, 0, 0, 0>>, [:padding, 28]} = select_u32_ir
+  end
+
+  test "struct in struct/composite" do
+    foo = [
+      val: [select_u32: 1]
+    ]
+
+    bar = [
+      val: [select_u64_nd_array: [[1, 2, 3], [4, 5, 6]]]
+    ]
+
+    foo_attributes = [
+      specs: %{
+        val: %{
+          type: :union,
+          union: [
+            other_u64: %{
+              type: :u64
+            },
+            select_u32: %{
+              type: :u32
+            },
+            inner: %{
+              type: :union,
+              union: [
+                inner_nd_array: %{
+                  type: [:u64],
+                  shape: [2, 2]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      order: [
+        :val
+      ]
+    ]
+
+    bar_attributes = [
+      specs: %{
+        val: %{
+          type: :union,
+          union: [
+            select_u64_nd_array: %{
+              type: [:u64],
+              shape: [1, 2, 3]
+            },
+            inner: %{
+              type: :union,
+              union: [
+                inner_nd_array: %{
+                  type: [:u64],
+                  shape: [2, 2]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      order: [
+        :val
+      ]
+    ]
+
+    data = [foo_part: foo, bar_part: bar]
+
+    attributes = [
+      specs: %{
+        foo_part: %{
+          type: :struct,
+          struct: foo_attributes
+        },
+        bar_part: %{
+          type: :struct,
+          struct: bar_attributes
+        }
+      },
+      order: [
+        :foo_part,
+        :bar_part
+      ]
+    ]
+
+    # struct foo {
+    #     union {
+    #         uint64_t other_u64;
+    #         uint32_t select_u32;
+    #         union {
+    #             uint64_t inner_nd_array[2][2];
+    #         } inner;
+    #     } val;
+    # };
+    #
+    # struct bar {
+    #     union {
+    #         uint64_t select_u64_nd_array[1][2][3];
+    #         union {
+    #             uint64_t inner_nd_array[2][2];
+    #         } inner;
+    #     } val;
+    # };
+    #
+    # struct composite {
+    #     struct foo foo_part;
+    #     struct bar bar_part;
+    # };
+    # sizeof(struct composite) == 80
+
+    ir = CStruct.to_c_struct(data, attributes, ir_only: true)
+
+    assert [
+             {<<1, 0, 0, 0>>, [:padding, 28]},
+             <<5, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0,
+               0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0>>
+           ] = ir
   end
 
   test "to c struct with invalid keyword_list and/or attributes" do
@@ -31,6 +257,7 @@ defmodule CStructTest do
 
     {:error, "some fields in attributes[:order] are not specified in attributes[:specs]"} =
       CStruct.to_c_struct(keyword_list, attributes)
+
     {:error, "some fields in attributes[:order] are not specified in attributes[:specs]"} =
       CStruct.to_c_struct(map, attributes)
   end
@@ -49,6 +276,7 @@ defmodule CStructTest do
 
     {:error, "some fields in attributes[:specs] are not specified in attributes[:order]"} =
       CStruct.to_c_struct(keyword_list, attributes)
+
     {:error, "some fields in attributes[:specs] are not specified in attributes[:order]"} =
       CStruct.to_c_struct(map, attributes)
   end
@@ -67,6 +295,7 @@ defmodule CStructTest do
 
     {:error, "some fields in specs are not appeared in the data"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: false)
+
     {:error, "some fields in specs are not appeared in the data"} =
       CStruct.to_c_struct(map, attributes, allow_missing: false)
   end
@@ -84,6 +313,7 @@ defmodule CStructTest do
 
     {:error, "some fields in the data are not declared in attributes"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "some fields in the data are not declared in attributes"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -101,6 +331,7 @@ defmodule CStructTest do
 
     {:error, "field 'a' did not specify its type"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "field 'a' did not specify its type"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -123,16 +354,23 @@ defmodule CStructTest do
       }
     ]
 
-    {:error, "the data of a union field should be provided as a keyword list that contains a single key-value pair"} =
+    {:error,
+     "the data of a union field should be provided as a keyword list that contains a single key-value pair"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
-    {:error, "the data of a union field should be provided as a keyword list that contains a single key-value pair"} =
+
+    {:error,
+     "the data of a union field should be provided as a keyword list that contains a single key-value pair"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
 
     keyword_list = [a: [num1: 1, num2: 2]]
     map = %{:a => [num1: 1, num2: 2]}
-    {:error, "the data of a union field should be provided as a keyword list that contains a single key-value pair, however, 2 keys found"} =
+
+    {:error,
+     "the data of a union field should be provided as a keyword list that contains a single key-value pair, however, 2 keys found"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
-    {:error, "the data of a union field should be provided as a keyword list that contains a single key-value pair, however, 2 keys found"} =
+
+    {:error,
+     "the data of a union field should be provided as a keyword list that contains a single key-value pair, however, 2 keys found"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
 
@@ -144,13 +382,14 @@ defmodule CStructTest do
       order: [:a],
       specs: %{
         :a => %{
-          :type => :union,
+          :type => :union
         }
       }
     ]
 
     {:error, "field 'a' declared as union type, but no union specs provided"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "field 'a' declared as union type, but no union specs provided"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -171,6 +410,7 @@ defmodule CStructTest do
 
     {:error, "the type of the union specs should be a keyword list"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "the type of the union specs should be a keyword list"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -193,6 +433,7 @@ defmodule CStructTest do
 
     {:error, "union field 'num' did not specify its type"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "union field 'num' did not specify its type"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -215,6 +456,7 @@ defmodule CStructTest do
 
     {:error, "union type specified to use 'num', but 'num' not found in union specs"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "union type specified to use 'num', but 'num' not found in union specs"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
@@ -237,6 +479,7 @@ defmodule CStructTest do
 
     {:error, "union field 'num' did not specify its type"} =
       CStruct.to_c_struct(keyword_list, attributes, allow_missing: true, allow_extra: false)
+
     {:error, "union field 'num' did not specify its type"} =
       CStruct.to_c_struct(map, attributes, allow_missing: true, allow_extra: false)
   end
