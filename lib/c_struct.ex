@@ -53,10 +53,15 @@ defmodule CStruct do
         re: %{:type => :f64},                           # double re;
         im: %{:type => :f32},                           # float im;
         data: %{:type => :c_ptr},                       # void * data;
+        data_size: %{:type => :u64},                    # uint64_t data_size; // uint64_t is basically size_t, but might not be true for 32bit OS?
         fix_size_array: %{:type => [:s32]},             # int fix_size_array[4]; // 4 <- auto inference
         fix_size_array2: %{:type => [:s64], length: 16} # int64_t fix_size_array2[16];
       },
-      order: [:im, :re, :data, :fix_size_array]
+      order: [                                          # this specifies the order of these fields, i.e., memory layout
+        :im, :re,
+        :data, :data_size,
+        :fix_size_array, :fix_size_array2
+      ]
     ]
     to_c_struct(keyword_list, attributes)
   end
