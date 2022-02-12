@@ -14,7 +14,7 @@ defmodule CStruct do
       iex> attributes = [specs: %{val: %{type: :u32}}, order: [:val]]
       [specs: %{val: %{type: :u32}}, order: [:val]]
       iex> CStruct.to_c_struct(data, attributes)
-      [<<1, 0, 0, 0>>]
+      <<1, 0, 0, 0>>
 
   ### Map
       iex> data = %{val: 1}
@@ -22,7 +22,7 @@ defmodule CStruct do
       iex> attributes = [specs: %{val: %{type: :u32, endianness: :big}}, order: [:val]]
       [specs: %{val: %{type: :u32}}, order: [:val]]
       iex> CStruct.to_c_struct(data, attributes)
-      [<<0, 0, 0, 1>>]
+      <<0, 0, 0, 1>>
   """
   def to_c_struct(data, attributes, opts \\ [])
   def to_c_struct(keyword_list, attributes, opts)
@@ -31,7 +31,7 @@ defmodule CStruct do
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
 
-    _to_c_struct(
+    ir = _to_c_struct(
       Keyword,
       keyword_list,
       attributes,
@@ -41,6 +41,7 @@ defmodule CStruct do
       Keyword.keyword?(keyword_list),
       Keyword.keyword?(attributes)
     )
+    CStruct.Nif.to_binary(ir)
   end
 
   def to_c_struct(map_data, attributes, opts)
@@ -49,7 +50,7 @@ defmodule CStruct do
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
 
-    _to_c_struct(
+    ir = _to_c_struct(
       Map,
       map_data,
       attributes,
@@ -59,6 +60,7 @@ defmodule CStruct do
       true,
       Keyword.keyword?(attributes)
     )
+    CStruct.Nif.to_binary(ir)
   end
 
   def to_c_struct(module, data, attributes, opts) when is_list(attributes) and is_list(opts) do
@@ -66,7 +68,7 @@ defmodule CStruct do
     allow_extra = Keyword.get(opts, :allow_extra, false)
     default_endianness = Keyword.get(opts, :default_endianness, :little)
 
-    _to_c_struct(
+    ir = _to_c_struct(
       module,
       data,
       attributes,
@@ -76,6 +78,7 @@ defmodule CStruct do
       true,
       Keyword.keyword?(attributes)
     )
+    CStruct.Nif.to_binary(ir)
   end
 
   defp _to_c_struct(
