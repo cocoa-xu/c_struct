@@ -12,6 +12,7 @@ defmodule CStruct.Nif do
     end
   end
 
-  def to_binary(_ir), do: :erlang.nif_error(:not_loaded)
+  def to_binary(_ir, _layout, _struct_size), do: :erlang.nif_error(:not_loaded)
   def ptr_size(), do: :erlang.nif_error(:not_loaded)
+  def free(_ptr), do: :erlang.nif_error(:not_loaded)
 end

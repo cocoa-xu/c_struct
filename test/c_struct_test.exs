@@ -4,8 +4,278 @@ defmodule CStructTest do
   test "to c struct with valid keyword_list and attributes" do
     keyword_list = CStruct.get_test_keyword_list()
     attributes = CStruct.get_test_attributes()
-    generated_c_struct_bin = CStruct.to_c_struct(keyword_list, attributes, ir_only: true)
-    assert is_list(generated_c_struct_bin)
+    {_binary, _ir, _layout, _struct_size} = CStruct.to_c_struct(keyword_list, attributes)
+  end
+
+  test "memory layout/alignas and pack" do
+    # alignas 1, pack 1
+    alignas = 1
+    pack = 1
+    attributes = [
+      specs: %{
+        c1: %{type: :u8},
+        c2: %{type: :u8},
+        c3: %{type: [:u8], shape: [3]},
+        ptr1: %{type: :c_ptr},
+      },
+      order: [
+        :c1,
+        :c2,
+        :c3,
+        :ptr1
+      ],
+      alignas: alignas,
+      pack: pack
+    ]
+
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 5,
+        size: 8,
+        padding_previous: 0
+      ]
+    ], 13} = CStruct.memory_layout(attributes)
+
+    # alignas 2, pack 1
+    alignas = 2
+    pack = 1
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 5,
+        size: 8,
+        padding_previous: 0
+      ]
+    ], 14} = CStruct.memory_layout(attributes)
+
+    # alignas 4, pack 1
+    alignas = 4
+    pack = 1
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 5,
+        size: 8,
+        padding_previous: 0
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 8, pack 1
+    alignas = 8
+    pack = 1
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 5,
+        size: 8,
+        padding_previous: 0
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 2, pack 2
+    alignas = 2
+    pack = 2
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 6,
+        size: 8,
+        padding_previous: 1
+      ]
+    ], 14} = CStruct.memory_layout(attributes)
+
+    # alignas 4, pack 2
+    alignas = 4
+    pack = 2
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 6,
+        size: 8,
+        padding_previous: 1
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 8, pack 2
+    alignas = 8
+    pack = 2
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 6,
+        size: 8,
+        padding_previous: 1
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 4, pack 4
+    alignas = 4
+    pack = 4
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 8,
+        size: 8,
+        padding_previous: 3
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 8, pack 4
+    alignas = 8
+    pack = 4
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 8,
+        size: 8,
+        padding_previous: 3
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 8, pack 8
+    alignas = 8
+    pack = 8
+    attributes =
+      attributes
+      |> Keyword.update(:alignas, alignas, fn _ -> alignas end)
+      |> Keyword.update(:pack, pack, fn _ -> pack end)
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 8,
+        size: 8,
+        padding_previous: 3
+      ]
+    ], 16} = CStruct.memory_layout(attributes)
+
+    # alignas 16, pack 16
+    alignas = 16
+    pack = 16
+    attributes = [
+      specs: %{
+        c1: %{type: :u8},
+        c2: %{type: :u8},
+        c3: %{type: [:u8], shape: [3]},
+        ptr1: %{type: :c_ptr},
+        u16: %{type: :u16},
+        ptr2: %{type: :c_ptr},
+      },
+      order: [
+        :c1,
+        :c2,
+        :c3,
+        :ptr1,
+        :u16,
+        :ptr2
+      ],
+      alignas: alignas,
+      pack: pack
+    ]
+    {[
+      [field: :c1, type: :u8, shape: nil, start: 0, size: 1, padding_previous: 0],
+      [field: :c2, type: :u8, shape: nil, start: 1, size: 1, padding_previous: 0],
+      [field: :c3, type: [:u8], shape: [3], start: 2, size: 3, padding_previous: 0],
+      [
+        field: :ptr1,
+        type: :c_ptr,
+        shape: nil,
+        start: 8,
+        size: 8,
+        padding_previous: 3
+      ],
+      [field: :u16, type: :u16, shape: nil, start: 16, size: 2, padding_previous: 0],
+      [
+        field: :ptr2,
+        type: :c_ptr,
+        shape: nil,
+        start: 24,
+        size: 8,
+        padding_previous: 6
+      ],
+    ], 32} = CStruct.memory_layout(attributes)
   end
 
   test "union field size" do

@@ -3,6 +3,8 @@ defmodule CStruct do
   Convert elixir Maps/Keyword List/Custom Module data to C structs
   """
 
+  import Bitwise
+
   @doc """
   Convert elixir Maps/Keyword List/Custom Module data to C structs
 
@@ -50,7 +52,8 @@ defmodule CStruct do
         if ir_only do
           ir
         else
-          {CStruct.Nif.to_binary(ir), ir}
+          {layout, struct_size} = CStruct.memory_layout(attributes)
+          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
         end
     end
   end
@@ -79,7 +82,8 @@ defmodule CStruct do
         if ir_only do
           ir
         else
-          {CStruct.Nif.to_binary(ir), ir}
+          {layout, struct_size} = CStruct.memory_layout(attributes)
+          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
         end
     end
   end
@@ -107,9 +111,46 @@ defmodule CStruct do
         if ir_only do
           ir
         else
-          {CStruct.Nif.to_binary(ir), ir}
+          {layout, struct_size} = CStruct.memory_layout(attributes)
+          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
         end
     end
+  end
+
+  def memory_layout(attributes) do
+    pack = attributes[:pack]
+    alignas = attributes[:alignas]
+    struct_specs = attributes[:specs]
+    struct_order = attributes[:order]
+    {description, struct_size} =
+      for field_name <- struct_order, reduce: {[], 0} do
+        {description, bytes_occupied} ->
+          field_specs = Access.get(struct_specs, field_name, nil)
+          field_type = field_specs[:type]
+          bytes_required = _field_size(field_type, field_specs)
+          field_addressed_by = min(_field_addressed_by(field_type, field_specs), pack)
+
+          next_address =
+            if rem(bytes_occupied, field_addressed_by) == 0 do
+              bytes_occupied
+            else
+              div(bytes_occupied + field_addressed_by, field_addressed_by) * field_addressed_by
+            end
+
+          bytes_padding = next_address - bytes_occupied
+
+          {
+            [
+              [
+                field: field_name, type: field_type, shape: field_specs[:shape],
+                start: next_address, size: bytes_required, padding_previous: bytes_padding
+              ] | description],
+            next_address + bytes_required,
+          }
+      end
+    struct_size = trunc(Float.ceil(struct_size / alignas)) * alignas
+    description = Enum.reverse(description)
+    {description, struct_size}
   end
 
   defp _to_c_struct(
@@ -351,6 +392,75 @@ defmodule CStruct do
     |> Enum.reverse()
   end
 
+  defp _field_addressed_by(:u8, _), do: 1
+  defp _field_addressed_by(:u16, _), do: 2
+  defp _field_addressed_by(:u32, _), do: 4
+  defp _field_addressed_by(:u64, _), do: 8
+  defp _field_addressed_by(:s8, _), do: 1
+  defp _field_addressed_by(:s16, _), do: 2
+  defp _field_addressed_by(:s32, _), do: 4
+  defp _field_addressed_by(:s64, _), do: 8
+  defp _field_addressed_by(:f32, _), do: 4
+  defp _field_addressed_by(:f64, _), do: 8
+  defp _field_addressed_by(:c_ptr, _), do: CStruct.Nif.ptr_size()
+  defp _field_addressed_by(:string, _), do: CStruct.Nif.ptr_size()
+
+  defp _field_addressed_by([field_type], field_specs) when is_atom(field_type) do
+    _field_size(field_type, field_specs)
+  end
+
+  defp _field_addressed_by([field_type], field_specs) when is_list(field_type) do
+    CStruct.Nif.ptr_size()
+  end
+
+  defp _field_addressed_by(:union, union_specs) when is_list(union_specs) do
+    union_specs
+    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+    |> Enum.map(fn {field_type, field_specs} ->
+      case field_type do
+        :union ->
+          _field_addressed_by(field_type, field_specs[:union])
+        :struct ->
+          _field_addressed_by(field_type, field_specs[:struct])
+        _ ->
+          _field_addressed_by(field_type, field_specs)
+      end
+    end)
+    |> Enum.max()
+  end
+
+  defp _field_addressed_by(:union, union_specs) when is_map(union_specs) do
+    union_specs[:union]
+    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+    |> Enum.map(fn {field_type, field_specs} ->
+      case field_type do
+        :union ->
+          _field_addressed_by(field_type, field_specs[:union])
+        :struct ->
+          _field_addressed_by(field_type, field_specs[:struct])
+        _ ->
+          _field_addressed_by(field_type, field_specs)
+      end
+    end)
+    |> Enum.max()
+  end
+
+  defp _field_addressed_by(:struct, struct_specs) do
+    struct_specs
+    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+    |> Enum.map(fn {field_type, field_specs} ->
+      case field_type do
+        :union ->
+          _field_addressed_by(field_type, field_specs[:union])
+        :struct ->
+          _field_addressed_by(field_type, field_specs[:struct])
+        _ ->
+          _field_addressed_by(field_type, field_specs)
+      end
+    end)
+    |> Enum.sum()
+  end
+
   defp _field_size(:u8, _), do: 1
   defp _field_size(:u16, _), do: 2
   defp _field_size(:u32, _), do: 4
@@ -366,7 +476,7 @@ defmodule CStruct do
 
   defp _field_size([field_type], field_specs) when is_atom(field_type) do
     num_elements =
-      List.to_tuple(field_specs[:shape] || [1])
+      List.to_tuple(Access.get(field_specs, :shape, [1]))
       |> Tuple.product()
 
     _field_size(field_type, field_specs) * num_elements
@@ -374,23 +484,58 @@ defmodule CStruct do
 
   defp _field_size([field_type], field_specs) when is_list(field_type) do
     num_elements =
-      List.to_tuple(field_specs[:shape] || [1])
+      List.to_tuple(Access.get(field_specs, :shape, [1]))
       |> Tuple.product()
 
     CStruct.Nif.ptr_size() * num_elements
   end
 
-  defp _field_size(:union, union_specs) do
+  defp _field_size(:union, union_specs) when is_list(union_specs) do
     union_specs
-    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+      |> Enum.map(&{Access.get(elem(&1, 1), :type), elem(&1, 1)})
+      |> Enum.map(fn {field_type, field_specs} ->
+        case field_type do
+          :union ->
+            _field_size(field_type, field_specs[:union])
+          :struct ->
+            _field_size(field_type, field_specs[:struct])
+          _ ->
+            _field_size(field_type, field_specs)
+        end
+      end)
+      |> Enum.max()
+  end
+
+  defp _field_size(:union, union_specs) when is_map(union_specs) do
+    union_specs[:union]
+    |> Enum.map(&{Access.get(elem(&1, 1), :type), elem(&1, 1)})
     |> Enum.map(fn {field_type, field_specs} ->
-      if field_type == :union do
-        _field_size(field_type, field_specs[:union])
-      else
-        _field_size(field_type, field_specs)
+      case field_type do
+        :union ->
+          _field_size(field_type, field_specs[:union])
+        :struct ->
+          _field_size(field_type, field_specs[:struct])
+        _ ->
+          _field_size(field_type, field_specs)
       end
     end)
     |> Enum.max()
+  end
+
+  defp _field_size(:struct, struct_specs) do
+    struct_specs
+      |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
+      |> Enum.map(fn {field_type, field_specs} ->
+        case field_type do
+          :union ->
+            _field_size(field_type, field_specs[:union])
+          :struct ->
+            _field_size(field_type, field_specs[:struct])
+          _ ->
+            _field_size(field_type, field_specs)
+        end
+      end)
+      |> Enum.sum()
   end
 
   defp _to_memory(field_data, :union, union_specs, endianness) do
@@ -500,9 +645,10 @@ defmodule CStruct do
   end
 
   def get_test_attributes() do
-    # todo: support align?
     # todo: support bitfield?
     [
+      alignas: 8,
+      pack: 8,
       specs: %{
         # double re;
         re: %{:type => :f64},
@@ -512,35 +658,38 @@ defmodule CStruct do
         data: %{:type => :c_ptr},
         # uint64_t data_size; // uint64_t is basically size_t, but might not be true for 32bit OS?
         data_size: %{:type => :u64},
-        # int fix_size_array[4]; // 4 <- auto inference
-        fix_size_array: %{:type => [:s32]},
+        # int fix_size_array[4];
+        fix_size_array: %{:type => [:s32], :shape => [4]},
         # int64_t fix_size_array2[16];
-        fix_size_array2: %{:type => [:s64], length: 16},
+        fix_size_array2: %{:type => [:s64], :shape => [16]},
         # uint32_t * array_of_array[2];
-        array_of_array: %{:type => [[:u32]], length: 2},
+        array_of_array: %{:type => [[:u32]], :shape => [2]},
         # uint64_t array_of_array_size[2]; // array_of_array_size[i]: #elements in in array_of_array[i]
-        array_of_array_size: %{:type => [:u64]},
+        array_of_array_size: %{:type => [:u64], :shape => [2]},
         # uint8_t ** array_of_array_of_array[3];
         array_of_array_of_array: %{
           :type => [[[:u8]]],
-          length: 3
+          :shape => [3]
         },
         # uint64_t array_of_array_of_array_size[3][1];
         array_of_array_of_array_size: %{
-          :type => [:u64]
+          :type => [:u64],
+          :shape => [3, 1]
         },
         # uint32_t matrix_2d[2][3];
         matrix_2d: %{
-          :type => [:u32]
+          :type => [:u32],
+          :shape => [2, 3]
         },
         # uint16_t matrix_3d[1][2][3];
         matrix_3d: %{
-          :type => [:u16]
+          :type => [:u16],
+          :shape => [1, 2, 3]
         },
         # void * message;       // not necessarily null-terminated, depends on the data passed
         message: %{:type => :c_ptr},
-        # uint8_t message2[12]; // not necessarily null-terminated, depends on the data passed
-        message2: %{:type => [:u8]},
+        # uint8_t message2[16]; // not necessarily null-terminated, depends on the data passed
+        message2: %{:type => [:u8], :shape => [16]},
         # const char * message3; // guaranteed to be null-terminated for :string
         message3: %{:type => :string},
         ptr_but_null: %{:type => :c_ptr},
