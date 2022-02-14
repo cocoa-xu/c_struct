@@ -155,6 +155,43 @@ attributes = [specs: [val: %{type: [:u32], shape: [2]}], alignas: 8, pack: 2]
 <<42, 0, 0, 0, 43, 0, 0, 0>> = binary
 ```
 
+In the example above, the two `uint32_t` values of `val` is placed in the struct, therefore, we don't need to allocate other memory.
+
+However, if we have a `uint32_t` array, we'll have to allocate memory for it, and the raw pointer (address) will be placed
+in `allocated_raw_resource`.
+
+```c
+#pragma pack(push, 8)
+struct alignas(8) example {
+    uint64_t *val[1]; // or uint64_t *val;
+    uint64_t other;
+};
+#pragma pack(pop)
+```
+
+```elixir
+data = [val: [42, 43, 44, 45], other: 0]
+attributes = [specs: [
+  val: %{type: [[:u32]], shape: [1]}, # note that shape: [1] here is the same as uint64_t *val[1]. It does not mean the length of the actual array.
+  other: %{type: :u64}
+], alignas: 8, pack: 8]
+{binary, allocated_raw_resource=[addr_of_val], _ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+```
+Now `binary` will be 16 bytes long, and the first 8 bytes actually indicates the value of `val`, which is a pointer (and
+basically an integer). The following 8 bytes will be `<< 0, 0, 0, 0, 0, 0, 0, 0 >>` because `other` is `uint64_t` and equals
+to `0`.
+
+`allocated_raw_resource` will contain one element, let's call it `addr_of_val`. `addr_of_val` is the start address of `val`.
+
+```c
+ErlNifBinary data/* = get IR of [42, 43, 44, 45] using enif_* APIs */;
+void * val = malloc(data.size);
+// skip checks for val == nullptr
+memcpy(val, data.data, data.size);
+// add the address (val) to the allocated_raw_resource list
+// allocated_raw_resource = [addr_of_val]
+```
+
 ## Installation
 
 If [available in Hex](https://hex.pm/docs/publish), the package can be installed
