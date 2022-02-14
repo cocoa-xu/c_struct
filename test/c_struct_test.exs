@@ -1,11 +1,52 @@
 defmodule CStructTest do
   use ExUnit.Case
 
-  test "to c struct with valid keyword_list and attributes" do
+  test "test with valid inputs/basic types" do
+    # #pragma pack(push, 1)
+    # struct alignas(1) test {
+    #   uint8_t val;
+    # };
+    # #pragma pack(pop)
+    data = [val: 42]
+    attributes = [specs: [val: %{type: :u8}], alignas: 1, pack: 1]
+    {:ok, struct_size} = CStruct.verify_attributes(attributes)
+    {binary, allocated_raw_resource=[], _ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    << 42::integer-size(8) >> = binary
+
+    # #pragma pack(push, 2)
+    # struct alignas(8) test {
+    #   uint32_t val[2];
+    # };
+    # #pragma pack(pop)
+    data = [val: [42, 43]]
+    attributes = [specs: [val: %{type: [:u32], shape: [2]}], alignas: 8, pack: 2]
+    {:ok, struct_size} = CStruct.verify_attributes(attributes)
+    {binary, allocated_raw_resource=[], _ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    <<42, 0, 0, 0, 43, 0, 0, 0>> = binary
+
+    # #pragma pack(push, 2)
+    # struct alignas(8) test {
+    #   uint16_t *val[1];
+    # };
+    # #pragma pack(pop)
+    # uint16_t values[3] = {42, 43, 44};
+    # struct test t = {.val = values};
+    data = [val: [42, 43, 44]]
+    attributes = [specs: [val: %{type: [[:u16]], shape: [1]}], alignas: 8, pack: 2]
+    {:ok, struct_size} = CStruct.verify_attributes(attributes)
+    {binary, allocated_raw_resource, ir, layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    IO.inspect(layout)
+    IO.inspect(ir)
+    IO.inspect(allocated_raw_resource)
+    IO.inspect(binary)
+  end
+
+  test "test with valid inputs" do
     data = get_test_data()
     attributes = get_test_attributes()
     {:ok, struct_size} = CStruct.verify_attributes(attributes)
-    {_binary, _ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    {binary, ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    IO.inspect({binary, ir})
   end
 
   test "verify attributes" do

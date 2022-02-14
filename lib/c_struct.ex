@@ -51,7 +51,12 @@ defmodule CStruct do
           ir
         else
           {layout, struct_size} = CStruct.memory_layout(attributes)
-          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
+          with {:ok, binary, allocated_raw_resource} <- CStruct.Nif.to_binary(ir, layout, struct_size) do
+            {binary, allocated_raw_resource, ir, layout, struct_size}
+          else
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
     end
   end
@@ -81,7 +86,12 @@ defmodule CStruct do
           ir
         else
           {layout, struct_size} = CStruct.memory_layout(attributes)
-          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
+          with {:ok, binary, allocated_raw_resource} <- CStruct.Nif.to_binary(ir, layout, struct_size) do
+            {binary, allocated_raw_resource, ir, layout, struct_size}
+          else
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
     end
   end
@@ -110,7 +120,12 @@ defmodule CStruct do
           ir
         else
           {layout, struct_size} = CStruct.memory_layout(attributes)
-          {CStruct.Nif.to_binary(ir, layout, struct_size), ir, layout, struct_size}
+          with {:ok, binary, allocated_raw_resource} <- CStruct.Nif.to_binary(ir, layout, struct_size) do
+            {binary, allocated_raw_resource, ir, layout, struct_size}
+          else
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
     end
   end
@@ -426,13 +441,30 @@ defmodule CStruct do
     [field_data]
   end
 
+  defp _to_memory(field_data, [[field_type]], endianness)
+       when is_list(field_data) and is_atom(field_type) do
+    # recurse on list of list
+    array_memory =
+      for array_data <- field_data, reduce: [] do
+        acc ->
+          [_to_memory(array_data, field_type, endianness) | acc]
+      end
+
+    array_memory =
+      array_memory
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+    [array_memory]
+  end
+
   defp _to_memory(field_data, [field_type], endianness)
        when is_list(field_data) and is_list(field_type) do
     # recurse on list of list
     array_memory =
       for array_data <- field_data, reduce: [] do
         acc ->
-          [_to_memory(array_data, field_type, endianness) | acc]
+          [array_type] = field_type
+          [_to_memory(array_data, array_type, endianness) | acc]
       end
 
     array_memory
