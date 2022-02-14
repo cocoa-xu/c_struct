@@ -3,8 +3,6 @@ defmodule CStruct do
   Convert elixir Maps/Keyword List/Custom Module data to C structs
   """
 
-  import Bitwise
-
   @doc """
   Convert elixir Maps/Keyword List/Custom Module data to C structs
 
@@ -13,16 +11,16 @@ defmodule CStruct do
 
       iex> data = [val: 1]
       [val: 1]
-      iex> attributes = [specs: %{val: %{type: :u32}}, order: [:val]]
-      [specs: %{val: %{type: :u32}}, order: [:val]]
+      iex> attributes = [specs: [val: %{type: :u32}], alignas: 1, pack: 1]
+      [specs: [val: %{type: :u32}], alignas: 1, pack: 1]
       iex> CStruct.to_c_struct(data, attributes)
       <<1, 0, 0, 0>>
 
   ### Map
       iex> data = %{val: 1}
       %{val: 1}
-      iex> attributes = [specs: %{val: %{type: :u32, endianness: :big}}, order: [:val]]
-      [specs: %{val: %{type: :u32}}, order: [:val]]
+      iex> attributes = [specs: [val: %{type: :u32, endianness: :big}], alignas: 1, pack: 1]
+      [specs: [val: %{type: :u32, endianness: :big}], alignas: 1, pack: 1]
       iex> CStruct.to_c_struct(data, attributes)
       <<0, 0, 0, 1>>
   """
@@ -117,40 +115,102 @@ defmodule CStruct do
     end
   end
 
-  def memory_layout(attributes) do
-    pack = attributes[:pack]
-    alignas = attributes[:alignas]
-    struct_specs = attributes[:specs]
-    struct_order = attributes[:order]
-    {description, struct_size} =
-      for field_name <- struct_order, reduce: {[], 0} do
-        {description, bytes_occupied} ->
-          field_specs = Access.get(struct_specs, field_name, nil)
-          field_type = field_specs[:type]
-          bytes_required = _field_size(field_type, field_specs)
-          field_addressed_by = min(_field_addressed_by(field_type, field_specs), pack)
-
-          next_address =
-            if rem(bytes_occupied, field_addressed_by) == 0 do
-              bytes_occupied
-            else
-              div(bytes_occupied + field_addressed_by, field_addressed_by) * field_addressed_by
+  def verify_attributes(attributes) do
+    with specs <- Access.get(attributes, :specs, false),
+         {:spces_type, true} <- {:spces_type, Keyword.keyword?(specs) and specs != []},
+         alignas <- Access.get(attributes, :alignas, false),
+         {:alignas_value, true} <- {:alignas_value, is_integer(alignas) and alignas > 0},
+         "1" <> alignas_binary_rep = Integer.to_string(alignas, 2),
+         {:alignas_value, true} <- {:alignas_value, "" == alignas_binary_rep or 0 == String.to_integer(alignas_binary_rep)},
+         pack <- Access.get(attributes, :pack, false),
+         {:pack_value, true} <- {:pack_value, is_integer(pack) and pack > 0},
+         "1" <> pack_binary_rep = Integer.to_string(trunc(pack), 2),
+         {:pack_value, true} <- {:pack_value, "" == pack_binary_rep or 0 == String.to_integer(pack_binary_rep)}
+    do
+      [struct_size, error_acc] =
+        for {field_name, field_specs} <- specs, reduce: [0, []] do
+          [bytes_occupied, error_acc] ->
+            case verify_field_specs(field_name, field_specs) do
+              {:error, message} ->
+                [bytes_occupied, [message | error_acc]]
+              {:ok, field_size} ->
+                {next_address, bytes_required, _bytes_padding} = _packing_field(bytes_occupied, field_specs, pack)
+                [next_address + bytes_required, error_acc]
             end
-
-          bytes_padding = next_address - bytes_occupied
-
-          {
-            [
-              [
-                field: field_name, type: field_type, shape: field_specs[:shape],
-                start: next_address, size: bytes_required, padding_previous: bytes_padding
-              ] | description],
-            next_address + bytes_required,
-          }
+        end
+      if error_acc != [] do
+        {:error, error_acc}
+      else
+        {:ok, trunc(Float.ceil(struct_size / alignas)) * alignas}
       end
-    struct_size = trunc(Float.ceil(struct_size / alignas)) * alignas
-    description = Enum.reverse(description)
-    {description, struct_size}
+    else
+      {:spces_type, _} ->
+        {:error, "specs should be a non-empty Keyword instance"}
+      {:alignas_value, _} ->
+        {:error, "alignas should be a positive integer and is a power of 2"}
+      {:pack_value, _} ->
+        {:error, "pack should be a positive integer and is a power of 2"}
+    end
+  end
+
+  def verify_field_specs(field_name, field_specs) do
+    with type <- Access.get(field_specs, :type, nil),
+         {:field_type, _type, {:ok, field_size}} <- {:field_type, type, _field_size(type, field_specs)} do
+      {:ok, field_size}
+    else
+      {:field_type, nil, _} ->
+        {:error, "field_specs: field '#{field_name}' has no type info"}
+      {:field_type, :union, {:error, message}} ->
+        {:error, "field_specs: union field '#{field_name}' type error: #{message}"}
+      {:field_type, _, {:error, message}} ->
+        {:error, "field_specs: field '#{field_name}' type error: #{message}"}
+    end
+  end
+
+  defp _packing_field(bytes_occupied, field_specs, pack) do
+    field_type = field_specs[:type]
+    {:ok, bytes_required} = _field_size(field_type, field_specs)
+    {:ok, type_addressed_by} = _field_addressed_by(field_type, field_specs)
+    field_addressed_by = min(type_addressed_by, pack)
+
+    next_address =
+      if rem(bytes_occupied, field_addressed_by) == 0 do
+        bytes_occupied
+      else
+        div(bytes_occupied + field_addressed_by, field_addressed_by) * field_addressed_by
+      end
+
+    {next_address, bytes_required, next_address - bytes_occupied}
+  end
+
+  def memory_layout(attributes) do
+    with {:ok, verified_size} <- verify_attributes(attributes) do
+      pack = attributes[:pack]
+      alignas = attributes[:alignas]
+      struct_specs = attributes[:specs]
+      {description, struct_size} =
+        for {field_name, field_specs} <- struct_specs, reduce: {[], 0} do
+          {description, bytes_occupied} ->
+            {next_address, bytes_required, bytes_padding} = _packing_field(bytes_occupied, field_specs, pack)
+
+            {
+              [
+                [
+                  field: field_name, type: field_specs[:type], shape: field_specs[:shape],
+                  start: next_address, size: bytes_required, padding_previous: bytes_padding
+                ] | description],
+              next_address + bytes_required,
+            }
+        end
+      struct_size = trunc(Float.ceil(struct_size / alignas)) * alignas
+      description = Enum.reverse(description)
+      # if they don't match, then there is a bug
+      ^struct_size = verified_size
+      {description, struct_size}
+    else
+      {:error, message} ->
+        {:error, message}
+    end
   end
 
   defp _to_c_struct(
@@ -166,14 +226,9 @@ defmodule CStruct do
        when is_boolean(allow_missing) and is_boolean(allow_extra) do
     fields_with_data = apply(module, :keys, [data])
 
-    with {:has_order, true} <- {:has_order, Keyword.has_key?(attributes, :order)},
-         {:has_specs, true} <- {:has_specs, Keyword.has_key?(attributes, :specs)},
-         field_order <- attributes[:order],
+    with {:verified_attributes, {:ok, _struct_size}} <- {:verified_attributes, verify_attributes(attributes)},
          field_specs <- attributes[:specs],
-         {:missing_fields_in_specs, true} <-
-           {:missing_fields_in_specs, _verify_fields(Map.keys(field_specs), field_order)},
-         {:missing_fields_in_order, true} <-
-           {:missing_fields_in_order, _verify_fields(field_order, Map.keys(field_specs))},
+         field_order <- Keyword.keys(field_specs),
          {:missing_fields_in_keyword, true} <-
            {:missing_fields_in_keyword,
             allow_missing or _verify_fields(fields_with_data, field_order)},
@@ -184,20 +239,11 @@ defmodule CStruct do
            _to_memory(module, field_order, data, field_specs, default_endianness, []) do
       generated_c_struct_bin
     else
-      {:error, reason} ->
-        {:error, reason}
+      {:error, message} ->
+        {:error, message}
 
-      {:has_order, false} ->
-        {:error, "missing :order in attributes"}
-
-      {:has_specs, false} ->
-        {:error, "missing :specs in attributes"}
-
-      {:missing_fields_in_specs, false} ->
-        {:error, "some fields in attributes[:order] are not specified in attributes[:specs]"}
-
-      {:missing_fields_in_order, false} ->
-        {:error, "some fields in attributes[:specs] are not specified in attributes[:order]"}
+      {:verified_attributes, {:error, message}} ->
+        {:error, message}
 
       {:missing_fields_in_keyword, false} ->
         {:error, "some fields in specs are not appeared in the data"}
@@ -205,18 +251,14 @@ defmodule CStruct do
       {:extra_fields_in_keyword, false} ->
         {:error, "some fields in the data are not declared in attributes"}
     end
-
-    # todo: 2. calculate the size in bytes
-    # todo: 3. handle `void * data`
-    # todo: 4. transform everything into binary (in C? in Elixir? seems to be easier if we do this in Elixir)
     # todo: 5. call NIF
   end
 
-  defp _to_c_struct(_module, _keyword_list, _attributes, _, _, _default_endianness, false, _),
-    do: report_error("not a valid keyword list")
+  defp _to_c_struct(_module, _data, _attributes, _, _, _default_endianness, false, _),
+    do: {:error, "not a valid keyword list"}
 
-  defp _to_c_struct(_module, _keyword_list, _attributes, _, _, _default_endianness, _, false),
-    do: report_error("attributes is invalid")
+  defp _to_c_struct(_module, _data, _attributes, _, _, _default_endianness, _, false),
+    do: {:error, "attributes is invalid"}
 
   defp _verify_fields(required_fields, fields_available) do
     # verify all fields in `fields_available` are specified in `required_fields`
@@ -241,8 +283,8 @@ defmodule CStruct do
          default_endianness,
          acc_memory
        ) do
-    field_data = apply(module, :get, [data, field])
-    field_spec = Map.get(field_specs, field)
+    field_data = Access.get(data, field)
+    field_spec = Access.get(field_specs, field)
 
     if Map.has_key?(field_spec, :type) do
       endianness = Map.get(field_spec, :endianness, default_endianness)
@@ -251,7 +293,7 @@ defmodule CStruct do
         case field_spec[:type] do
           :union ->
             if Map.has_key?(field_spec, :union) do
-              with {:ok, binary} <- _to_memory(field_data, :union, field_spec[:union], endianness) do
+              with {:ok, binary} <- _to_memory(field_data, :union, field_spec, endianness) do
                 {:ok, binary}
               else
                 {:error, reason} ->
@@ -346,6 +388,11 @@ defmodule CStruct do
     [field_data]
   end
 
+  defp _to_memory(field_data, :c_ptr, _endianness) when is_integer(field_data) do
+    # raw pointer
+    {field_data, :raw_pointer}
+  end
+
   defp _to_memory(:nullptr, :c_ptr, _endianness) do
     :nullptr
   end
@@ -392,153 +439,169 @@ defmodule CStruct do
     |> Enum.reverse()
   end
 
-  defp _field_addressed_by(:u8, _), do: 1
-  defp _field_addressed_by(:u16, _), do: 2
-  defp _field_addressed_by(:u32, _), do: 4
-  defp _field_addressed_by(:u64, _), do: 8
-  defp _field_addressed_by(:s8, _), do: 1
-  defp _field_addressed_by(:s16, _), do: 2
-  defp _field_addressed_by(:s32, _), do: 4
-  defp _field_addressed_by(:s64, _), do: 8
-  defp _field_addressed_by(:f32, _), do: 4
-  defp _field_addressed_by(:f64, _), do: 8
-  defp _field_addressed_by(:c_ptr, _), do: CStruct.Nif.ptr_size()
-  defp _field_addressed_by(:string, _), do: CStruct.Nif.ptr_size()
+  defp _field_addressed_by(:u8, _), do: {:ok, 1}
+  defp _field_addressed_by(:u16, _), do: {:ok, 2}
+  defp _field_addressed_by(:u32, _), do: {:ok, 4}
+  defp _field_addressed_by(:u64, _), do: {:ok, 8}
+  defp _field_addressed_by(:s8, _), do: {:ok, 1}
+  defp _field_addressed_by(:s16, _), do: {:ok, 2}
+  defp _field_addressed_by(:s32, _), do: {:ok, 4}
+  defp _field_addressed_by(:s64, _), do: {:ok, 8}
+  defp _field_addressed_by(:f32, _), do: {:ok, 4}
+  defp _field_addressed_by(:f64, _), do: {:ok, 8}
+  defp _field_addressed_by(:c_ptr, _), do: {:ok, CStruct.Nif.ptr_size()}
+  defp _field_addressed_by(:string, _), do: {:ok, CStruct.Nif.ptr_size()}
 
   defp _field_addressed_by([field_type], field_specs) when is_atom(field_type) do
     _field_size(field_type, field_specs)
   end
 
-  defp _field_addressed_by([field_type], field_specs) when is_list(field_type) do
-    CStruct.Nif.ptr_size()
+  defp _field_addressed_by([field_type], _field_specs) when is_list(field_type) do
+    {:ok, CStruct.Nif.ptr_size()}
   end
 
-  defp _field_addressed_by(:union, union_specs) when is_list(union_specs) do
-    union_specs
-    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
-    |> Enum.map(fn {field_type, field_specs} ->
-      case field_type do
-        :union ->
-          _field_addressed_by(field_type, field_specs[:union])
-        :struct ->
-          _field_addressed_by(field_type, field_specs[:struct])
-        _ ->
-          _field_addressed_by(field_type, field_specs)
-      end
+  defp _field_addressed_by(:union, %{type: :union, union: union_specs}) do
+    [ok_acc, error_acc] =
+      union_specs
+      |> Enum.reduce([[], []], fn {_field_name, field_specs}, [ok_acc, error_acc] ->
+        field_type = field_specs[:type]
+        case _field_addressed_by(field_type, field_specs) do
+          {:ok, addressed_by} ->
+            [[addressed_by | ok_acc], error_acc]
+          {:error, message} ->
+            [ok_acc, [message | error_acc]]
+        end
     end)
-    |> Enum.max()
+
+    case [ok_acc, error_acc] do
+      [[], []] ->
+        {:error, "union field specs should be a non-empty Keyword instance"}
+      [ok_acc, []] ->
+        {:ok, Enum.max(ok_acc)}
+      [_, errors] ->
+        {:error, errors}
+    end
   end
 
-  defp _field_addressed_by(:union, union_specs) when is_map(union_specs) do
-    union_specs[:union]
-    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
-    |> Enum.map(fn {field_type, field_specs} ->
-      case field_type do
-        :union ->
-          _field_addressed_by(field_type, field_specs[:union])
-        :struct ->
-          _field_addressed_by(field_type, field_specs[:struct])
-        _ ->
-          _field_addressed_by(field_type, field_specs)
-      end
-    end)
-    |> Enum.max()
+  defp _field_addressed_by(:struct, %{type: :struct, struct: struct_specs}) do
+    verify_attributes(struct_specs)
   end
 
-  defp _field_addressed_by(:struct, struct_specs) do
-    struct_specs
-    |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
-    |> Enum.map(fn {field_type, field_specs} ->
-      case field_type do
-        :union ->
-          _field_addressed_by(field_type, field_specs[:union])
-        :struct ->
-          _field_addressed_by(field_type, field_specs[:struct])
-        _ ->
-          _field_addressed_by(field_type, field_specs)
-      end
-    end)
-    |> Enum.sum()
-  end
-
-  defp _field_size(:u8, _), do: 1
-  defp _field_size(:u16, _), do: 2
-  defp _field_size(:u32, _), do: 4
-  defp _field_size(:u64, _), do: 8
-  defp _field_size(:s8, _), do: 1
-  defp _field_size(:s16, _), do: 2
-  defp _field_size(:s32, _), do: 4
-  defp _field_size(:s64, _), do: 8
-  defp _field_size(:f32, _), do: 4
-  defp _field_size(:f64, _), do: 8
-  defp _field_size(:c_ptr, _), do: CStruct.Nif.ptr_size()
-  defp _field_size(:string, _), do: CStruct.Nif.ptr_size()
+  defp _field_size(:u8, _), do: {:ok, 1}
+  defp _field_size(:u16, _), do: {:ok, 2}
+  defp _field_size(:u32, _), do: {:ok, 4}
+  defp _field_size(:u64, _), do: {:ok, 8}
+  defp _field_size(:s8, _), do: {:ok, 1}
+  defp _field_size(:s16, _), do: {:ok, 2}
+  defp _field_size(:s32, _), do: {:ok, 4}
+  defp _field_size(:s64, _), do: {:ok, 8}
+  defp _field_size(:f32, _), do: {:ok, 4}
+  defp _field_size(:f64, _), do: {:ok, 8}
+  defp _field_size(:c_ptr, _), do: {:ok, CStruct.Nif.ptr_size()}
+  defp _field_size(:string, _), do: {:ok, CStruct.Nif.ptr_size()}
 
   defp _field_size([field_type], field_specs) when is_atom(field_type) do
-    num_elements =
-      List.to_tuple(Access.get(field_specs, :shape, [1]))
-      |> Tuple.product()
+    with shape <- Access.get(field_specs, :shape, nil),
+         {:array_type_should_have_shape, true} <- {:array_type_should_have_shape, is_list(shape) and Enum.all?(shape, fn elem -> is_integer(elem) and elem > 0 end)},
+         {:element_type, {:ok, element_size}} <- {:element_type, _field_size(field_type, field_specs)}
+         do
+      num_elements =
+        List.to_tuple(shape)
+        |> Tuple.product()
 
-    _field_size(field_type, field_specs) * num_elements
+      {:ok, element_size * num_elements}
+    else
+      {:array_type_should_have_shape, false} ->
+        {:error, "array type '#{inspect([field_type])}' should declare its shape in an integer list"}
+      {:element_type, {:error, message}} ->
+        {:error, "array type '#{inspect([field_type])}': element: #{message}"}
+    end
   end
 
   defp _field_size([field_type], field_specs) when is_list(field_type) do
-    num_elements =
-      List.to_tuple(Access.get(field_specs, :shape, [1]))
-      |> Tuple.product()
+    with shape <- Access.get(field_specs, :shape, nil),
+         {:pointer_array_type_should_have_shape, true} <- {:pointer_array_type_should_have_shape, is_list(shape) and Enum.all?(shape, fn elem -> is_integer(elem) and elem > 0 end)}
+      do
+      num_elements =
+        List.to_tuple(shape)
+        |> Tuple.product()
 
-    CStruct.Nif.ptr_size() * num_elements
+      {:ok, CStruct.Nif.ptr_size() * num_elements}
+    else
+      {:pointer_array_type_should_have_shape, false} ->
+        {:error, "pointer array type '#{inspect([field_type])}' should declare its shape in an integer list"}
+    end
   end
 
-  defp _field_size(:union, union_specs) when is_list(union_specs) do
-    union_specs
-      |> Enum.map(&{Access.get(elem(&1, 1), :type), elem(&1, 1)})
-      |> Enum.map(fn {field_type, field_specs} ->
-        case field_type do
-          :union ->
-            _field_size(field_type, field_specs[:union])
-          :struct ->
-            _field_size(field_type, field_specs[:struct])
-          _ ->
-            _field_size(field_type, field_specs)
-        end
-      end)
-      |> Enum.max()
-  end
+  defp _field_size(:union, %{type: :union, union: union_specs}) do
+    with {:union_specs_should_be_keyword, true} <- {:union_specs_should_be_keyword, Keyword.keyword?(union_specs) and union_specs != []},
+         {:all_union_fields_should_have_type, []} <- {:all_union_fields_should_have_type, Enum.reduce(union_specs, [], fn {union_field_name, union_field_specs}, acc ->
+            if Access.get(union_field_specs, :type, nil) == nil do
+              ["'#{union_field_name}'" | acc]
+            else
+              acc
+            end
+         end)}
+    do
+      [ok_union_fields, error_union_fields] =
+        Enum.reduce(union_specs, [[], []], fn {field_name, field_specs}, [ok_acc, error_acc] ->
+          field_type = field_specs[:type]
+          case {field_type, _field_size(field_type, field_specs)} do
+            {_, {:ok, size}} ->
+              [[size | ok_acc], error_acc]
+            {:union, {:error, message}} ->
+              [ok_acc, ["union field '#{field_name}': #{message}" | error_acc]]
+            {:struct, {:error, message}} ->
+              [ok_acc, ["struct field '#{field_name}': #{message}" | error_acc]]
+            {field_type, {:error, message}} ->
+              [ok_acc, ["'#{inspect(field_type)}' field '#{field_name}': #{message}" | error_acc]]
+          end
+        end)
 
-  defp _field_size(:union, union_specs) when is_map(union_specs) do
-    union_specs[:union]
-    |> Enum.map(&{Access.get(elem(&1, 1), :type), elem(&1, 1)})
-    |> Enum.map(fn {field_type, field_specs} ->
-      case field_type do
-        :union ->
-          _field_size(field_type, field_specs[:union])
-        :struct ->
-          _field_size(field_type, field_specs[:struct])
-        _ ->
-          _field_size(field_type, field_specs)
+      case [ok_union_fields, error_union_fields] do
+        [[], []] ->
+          {:error, "union field specs should be a non-empty Keyword instance"}
+        [ok_union_fields, []] ->
+          {:ok, Enum.max(ok_union_fields)}
+        [_, error_union_fields] ->
+          error_message =
+            error_union_fields
+            |> Enum.reverse()
+            |> Enum.join(", ")
+          {:error, error_message}
       end
-    end)
-    |> Enum.max()
+    else
+      {:union_specs_should_be_keyword, false} ->
+        {:error, "union field specs should be a non-empty Keyword instance"}
+      {:all_union_fields_should_have_type, missing_types} ->
+        fields_missing_type =
+          missing_types
+          |> Enum.reverse()
+          |> Enum.join(", ")
+        {:error, "#{fields_missing_type} did not specify their types"}
+    end
   end
 
-  defp _field_size(:struct, struct_specs) do
-    struct_specs
-      |> Enum.map(&{Map.get(elem(&1, 1), :type), elem(&1, 1)})
-      |> Enum.map(fn {field_type, field_specs} ->
-        case field_type do
-          :union ->
-            _field_size(field_type, field_specs[:union])
-          :struct ->
-            _field_size(field_type, field_specs[:struct])
-          _ ->
-            _field_size(field_type, field_specs)
-        end
-      end)
-      |> Enum.sum()
+  defp _field_size(:union, %{type: :union}) do
+    {:error, "declared as union type, but no union specs provided"}
   end
 
-  defp _to_memory(field_data, :union, union_specs, endianness) do
+  defp _field_size(:struct, %{type: :struct, struct: attributes}) do
+    with {:valid_struct_specs, {:ok, struct_size}} <- {:valid_struct_specs, verify_attributes(attributes)} do
+      {:ok, struct_size}
+    else
+      {:valid_struct_specs, {:error, error_message}} ->
+        {:error, error_message}
+    end
+  end
+
+  defp _field_size(:struct, %{type: :struct}) do
+    {:error, "declared as struct type, but no struct specs provided"}
+  end
+
+  defp _field_size(field_type, _), do: {:error, "type '#{inspect(field_type)}' is not supported"}
+
+  defp _to_memory(field_data, :union, full_union_specs=%{type: :union, union: union_specs}, endianness) do
     with {:is_keyword_list, true} <- {:is_keyword_list, Keyword.keyword?(field_data)},
          {:is_union_specs_keyword_list, true} <-
            {:is_union_specs_keyword_list, Keyword.keyword?(union_specs)},
@@ -562,7 +625,8 @@ defmodule CStruct do
           {real_binary_data, [:padding, padding]} when is_list(real_binary_data) ->
             CStruct.Nif.ptr_size() + padding
         end
-      max_size = _field_size(:union, union_specs)
+
+      {:ok, max_size} = _field_size(:union, full_union_specs)
 
       binary =
         if real_size < max_size do
@@ -591,216 +655,5 @@ defmodule CStruct do
       {:specs_has_type, field_select, false} ->
         {:error, "union field '#{field_select}' did not specify its type"}
     end
-  end
-
-  defp report_error(reason) do
-    {:error, reason}
-  end
-
-  def get_test_keyword_list() do
-    [
-      im: 1,
-      re: 1,
-      data: <<1, 2, 3, 4>>,
-      data_size: 4,
-      fix_size_array: [5, 6, 7, 8],
-      fix_size_array2: [9, 10, 11, 12],
-      array_of_array: [[13, 14, 15, 16], [17, 18, 19, 20]],
-      array_of_array_size: [4, 4],
-      array_of_array_of_array: [
-        [[21, 22, 23, 24]],
-        [[25, 26, 27, 28, 29]],
-        [[30, 31, 32, 34, 35, 36]]
-      ],
-      array_of_array_of_array_size: [[4], [5], [6]],
-      matrix_2d: [
-        [37, 38, 39],
-        [40, 41, 42]
-      ],
-      matrix_3d: [
-        [
-          [0, 1, 2],
-          [3, 4, 5]
-        ]
-      ],
-      message: "hello world",
-      message2: "hello world!",
-      message3: "null-terminated",
-      ptr_but_null: :nullptr,
-      union_data1: [num: 123],
-      union_data2: [str: "456"],
-      s8: 127,
-      le_s16: 12345,
-      be_u16: 12345,
-      be_u32: 12345,
-      be_u64: 12345,
-      be_s16: -12345,
-      be_s32: -12345,
-      be_s64: -12345,
-      be_f32: 123.456,
-      be_f64: -123.456,
-      null_terminated_string: "hello",
-      null_terminated_iodata: [1, 2, 4, 8]
-    ]
-  end
-
-  def get_test_attributes() do
-    # todo: support bitfield?
-    [
-      alignas: 8,
-      pack: 8,
-      specs: %{
-        # double re;
-        re: %{:type => :f64},
-        # float im;
-        im: %{:type => :f32},
-        # void * data;
-        data: %{:type => :c_ptr},
-        # uint64_t data_size; // uint64_t is basically size_t, but might not be true for 32bit OS?
-        data_size: %{:type => :u64},
-        # int fix_size_array[4];
-        fix_size_array: %{:type => [:s32], :shape => [4]},
-        # int64_t fix_size_array2[16];
-        fix_size_array2: %{:type => [:s64], :shape => [16]},
-        # uint32_t * array_of_array[2];
-        array_of_array: %{:type => [[:u32]], :shape => [2]},
-        # uint64_t array_of_array_size[2]; // array_of_array_size[i]: #elements in in array_of_array[i]
-        array_of_array_size: %{:type => [:u64], :shape => [2]},
-        # uint8_t ** array_of_array_of_array[3];
-        array_of_array_of_array: %{
-          :type => [[[:u8]]],
-          :shape => [3]
-        },
-        # uint64_t array_of_array_of_array_size[3][1];
-        array_of_array_of_array_size: %{
-          :type => [:u64],
-          :shape => [3, 1]
-        },
-        # uint32_t matrix_2d[2][3];
-        matrix_2d: %{
-          :type => [:u32],
-          :shape => [2, 3]
-        },
-        # uint16_t matrix_3d[1][2][3];
-        matrix_3d: %{
-          :type => [:u16],
-          :shape => [1, 2, 3]
-        },
-        # void * message;       // not necessarily null-terminated, depends on the data passed
-        message: %{:type => :c_ptr},
-        # uint8_t message2[16]; // not necessarily null-terminated, depends on the data passed
-        message2: %{:type => [:u8], :shape => [16]},
-        # const char * message3; // guaranteed to be null-terminated for :string
-        message3: %{:type => :string},
-        ptr_but_null: %{:type => :c_ptr},
-        # union {
-        #   uint32_t num;
-        #   void * str;
-        # } union_data1;
-        union_data1: %{
-          :type => :union,
-          :union => [
-            num: %{
-              :type => :u32
-            },
-            str: %{
-              :type => :c_ptr
-            }
-          ]
-        },
-        # union {
-        #   uint32_t num;
-        #   void * str;
-        # } union_data2;
-        union_data2: %{
-          :type => :union,
-          :union => [
-            num: %{
-              :type => :u32
-            },
-            str: %{
-              :type => :c_ptr
-            }
-          ]
-        },
-        s8: %{
-          :type => :s8
-        },
-        le_s16: %{
-          :type => :s16
-        },
-        be_u16: %{
-          :type => :u16,
-          :endianness => :big
-        },
-        be_u32: %{
-          :type => :u32,
-          :endianness => :big
-        },
-        be_u64: %{
-          :type => :u64,
-          :endianness => :big
-        },
-        be_s16: %{
-          :type => :s16,
-          :endianness => :big
-        },
-        be_s32: %{
-          :type => :s32,
-          :endianness => :big
-        },
-        be_s64: %{
-          :type => :s64,
-          :endianness => :big
-        },
-        be_f32: %{
-          :type => :f32,
-          :endianness => :big
-        },
-        be_f64: %{
-          :type => :f64,
-          :endianness => :big
-        },
-        null_terminated_string: %{
-          :type => :string
-        },
-        null_terminated_iodata: %{
-          :type => :string
-        }
-      },
-      # this specifies the order of these fields, i.e., memory layout
-      order: [
-        :im,
-        :re,
-        :data,
-        :data_size,
-        :fix_size_array,
-        :fix_size_array2,
-        :array_of_array,
-        :array_of_array_size,
-        :array_of_array_of_array,
-        :array_of_array_of_array_size,
-        :matrix_2d,
-        :matrix_3d,
-        :message,
-        :message2,
-        :message3,
-        :ptr_but_null,
-        :union_data1,
-        :union_data2,
-        :s8,
-        :le_s16,
-        :be_u16,
-        :be_u32,
-        :be_u64,
-        :be_s16,
-        :be_s32,
-        :be_s64,
-        :be_f32,
-        :be_f64,
-        :null_terminated_string,
-        :null_terminated_iodata
-      ]
-    ]
   end
 end
