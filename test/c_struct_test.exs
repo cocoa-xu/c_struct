@@ -45,7 +45,7 @@ defmodule CStructTest do
     data = get_test_data()
     attributes = get_test_attributes()
     {:ok, struct_size} = CStruct.verify_attributes(attributes)
-    {binary, ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
+    {binary, allocated_raw_resource, ir, _layout, ^struct_size} = CStruct.to_c_struct(data, attributes)
     IO.inspect({binary, ir})
   end
 
@@ -163,16 +163,16 @@ defmodule CStructTest do
     }], alignas: 1, pack: 1]
     {:error, ["field_specs: union field 'val' type error: union field 'foo': 'u16' did not specify their types, union field 'bar': 'ptr' did not specify their types"]} = CStruct.verify_attributes(attributes)
 
-    # struct {
-    #   union {
-    #     uint8_t u8;
-    #     uint16_t u16;
-    #   } foo;
-    #   union {
-    #     uint16_t u16;
-    #     void * ptr;
-    #   } bar;
-    # };
+#     struct {
+#       union {
+#         uint8_t u8;
+#         uint16_t u16;
+#       } foo;
+#       union {
+#         uint16_t u16;
+#         void * ptr;
+#       } bar;
+#     };
     attributes = [specs: [val: %{
       type: :union,
       union: [
